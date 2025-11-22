@@ -145,6 +145,7 @@ jobs:
           steps.find-pr.outputs.merged == 'false' &&
           steps.find-pr.outputs.draft == 'false' &&
           (steps.find-pr.outputs.base == 'main')
+
         uses: actions/github-script@v7
         with:
           github-token: ${{ steps.setup-token.outputs.token }}
