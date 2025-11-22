@@ -1,0 +1,228 @@
+name: Auto-merge PR
+
+on:
+  workflow_run:
+    workflows: ["iOS Build and Test"]
+    types:
+      - completed
+
+jobs:
+  auto-merge:
+    name: Auto-merge after checks pass
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'pull_request' }}
+    permissions:
+      contents: write
+      pull-requests: write
+      checks: read
+      statuses: read
+    
+    steps:
+      - name: Setup token
+        id: setup-token
+        run: |
+          # Use PAT if provided, otherwise use GITHUB_TOKEN
+          if [ -n "${{ secrets.AUTO_MERGE_PAT }}" ]; then
+            echo "Using Personal Access Token from secrets"
+            echo "token=${{ secrets.AUTO_MERGE_PAT }}" >> $GITHUB_OUTPUT
+          else
+            echo "Using default GITHUB_TOKEN"
+            echo "token=${{ secrets.GITHUB_TOKEN }}" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Find Pull Request
+        id: find-pr
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ steps.setup-token.outputs.token }}
+          script: |
+            const headSha = '${{ github.event.workflow_run.head_sha }}';
+            const headBranch = '${{ github.event.workflow_run.head_branch }}';
+            
+            const { data: prs } = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              head: `${context.repo.owner}:${headBranch}`,
+            });
+            
+            if (prs.length > 0) {
+              const pr = prs.find(p => p.head.sha === headSha) || prs[0];
+              core.setOutput('number', pr.number);
+              core.setOutput('base', pr.base.ref);
+              core.setOutput('draft', pr.draft);
+              core.setOutput('mergeable', pr.mergeable);
+              core.setOutput('merged', pr.merged);
+              console.log(`Found PR #${pr.number}`);
+              return pr.number;
+            }
+            console.log('No open PR found');
+            return null;
+
+      - name: Wait for all checks to complete
+        if: steps.find-pr.outputs.number != ''
+        id: wait-checks
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ steps.setup-token.outputs.token }}
+          script: |
+            const headSha = '${{ github.event.workflow_run.head_sha }}';
+            const maxWaitTime = 30 * 60 * 1000;
+            const checkInterval = 15 * 1000;
+            const startTime = Date.now();
+            
+            console.log('Waiting for all checks to complete...');
+            console.log(`Commit: ${headSha}`);
+            
+            while (Date.now() - startTime < maxWaitTime) {
+              const { data: checks } = await github.rest.checks.listForRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: headSha,
+              });
+              
+              const allChecks = (checks.check_runs || []).slice().sort((a, b) => {
+                const aTime = new Date(a.started_at || a.created_at || 0).getTime();
+                const bTime = new Date(b.started_at || b.created_at || 0).getTime();
+                return bTime - aTime; // новый сначала
+              });
+              
+              const latestByName = new Map();
+              for (const check of allChecks) {
+                if (!latestByName.has(check.name)) {
+                  latestByName.set(check.name, check);
+                }
+              }
+              
+              const latestChecks = Array.from(latestByName.values());
+              
+              const completedChecks = latestChecks.filter(c => c.status === 'completed');
+              const inProgressChecks = latestChecks.filter(c => c.status === 'in_progress' || c.status === 'queued');
+              const successfulChecks = completedChecks.filter(c => c.conclusion === 'success');
+              const failedChecks = completedChecks.filter(c => 
+                c.conclusion === 'failure' || 
+                c.conclusion === 'timed_out' ||
+                c.conclusion === 'action_required'
+              );
+              
+              console.log(`\n=== Check Status (${new Date().toISOString()}) ===`);
+              console.log(`Total checks (latest per name): ${latestChecks.length}`);
+              console.log(`  Completed: ${completedChecks.length}`);
+              console.log(`  In progress: ${inProgressChecks.length}`);
+              console.log(`  Successful: ${successfulChecks.length}`);
+              console.log(`  Failed: ${failedChecks.length}`);
+              
+              if (latestChecks.length > 0) {
+                console.log('\nCheck details:');
+                latestChecks.forEach(check => {
+                  console.log(`  - ${check.name}: ${check.status} (${check.conclusion || 'N/A'})`);
+                });
+              }
+              
+              if (failedChecks.length > 0) {
+                console.log(`\nFailed checks detected:`);
+                failedChecks.forEach(check => {
+                  console.log(`  - ${check.name}: ${check.conclusion}`);
+                });
+                core.setOutput('all_passed', 'false');
+                return { allPassed: false, state: 'failure' };
+              }
+              
+              if (latestChecks.length > 0 && inProgressChecks.length === 0) {
+                if (completedChecks.length === latestChecks.length && successfulChecks.length === completedChecks.length) {
+                  console.log('\nAll checks passed successfully!');
+                  core.setOutput('all_passed', 'true');
+                  return { allPassed: true, state: 'success' };
+                }
+              }
+              
+              if (latestChecks.length === 0) {
+                console.log('\nNo checks found via Checks API, but main workflow completed successfully');
+                console.log('Considering all checks passed');
+                core.setOutput('all_passed', 'true');
+                return { allPassed: true, state: 'success' };
+              }
+              
+              console.log(`\nWaiting ${checkInterval / 1000} seconds before next check...`);
+              await new Promise(resolve => setTimeout(resolve, checkInterval));
+            }
+            
+            console.log('\nTimeout waiting for checks');
+            core.setOutput('all_passed', 'false');
+            return { allPassed: false, state: 'timeout' };
+
+      - name: Auto-merge Pull Request
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ steps.setup-token.outputs.token }}
+          script: |
+            const prNumber = ${{ steps.find-pr.outputs.number }};
+            
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber,
+            });
+            
+            try {
+              const result = await github.rest.pulls.merge({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber,
+                merge_method: 'squash',
+                commit_title: `Merge PR #${prNumber}: ${pr.title}`,
+                commit_message: `Automatically merged after all checks passed\n\n${pr.body || ''}`,
+              });
+              
+              console.log(`PR #${prNumber} successfully auto-merged`);
+            } catch (error) {
+              console.log(`Failed to auto-merge PR: ${error.message}`);
+              core.setFailed(`Auto-merge failed: ${error.message}`);
+            }
+
+      - name: Explain why auto-merge was skipped
+        if: |
+          steps.find-pr.outputs.number != '' &&
+          !(steps.wait-checks.outputs.all_passed == 'true' &&
+            steps.find-pr.outputs.merged == 'false' &&
+            steps.find-pr.outputs.draft == 'false' &&
+            (steps.find-pr.outputs.base == 'main'))
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ steps.setup-token.outputs.token }}
+          script: |
+            const allPassed = '${{ steps.wait-checks.outputs.all_passed }}' === 'true';
+            const merged = '${{ steps.find-pr.outputs.merged }}' === 'true';
+            const draft = '${{ steps.find-pr.outputs.draft }}' === 'true';
+            const base = '${{ steps.find-pr.outputs.base }}';
+            const prNumber = ${{ steps.find-pr.outputs.number }};
+
+            console.log('\n=== Auto-merge conditions debug ===');
+            console.log(`PR #: ${prNumber}`);
+            console.log(`allPassed (wait-checks.outputs.all_passed == 'true'): ${allPassed}`);
+            console.log(`merged (should be false): ${merged}`);
+            console.log(`draft (should be false): ${draft}`);
+            console.log(`base (should be 'main'): '${base}'`);
+
+            const reasons = [];
+            if (!allPassed) {
+              reasons.push('Not all required checks passed (all_passed != true)');
+            }
+            if (merged) {
+              reasons.push('PR is already merged');
+            }
+            if (draft) {
+              reasons.push('PR is in draft state');
+            }
+            if (base !== 'main') {
+              reasons.push(`Base branch is not main (actual: '${base}')`);
+            }
+
+            if (reasons.length === 0) {
+              console.log('All conditions look satisfied, but auto-merge step did not run. Check workflow syntax or GitHub UI.');
+            } else {
+              console.log('\nAuto-merge was skipped because:');
+              for (const r of reasons) {
+                console.log(`- ${r}`);
+              }
+            }
