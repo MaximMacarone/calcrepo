@@ -1,0 +1,104 @@
+name: Auto-merge PR
+
+on:
+  workflow_run:
+    workflows: ["iOS Build and Test"]
+    types:
+      - completed
+
+jobs:
+  auto-merge:
+    name: Auto-merge after checks pass
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'pull_request' }}
+    permissions:
+      contents: write
+      pull-requests: write
+    
+    steps:
+      - name: Find Pull Request
+        id: find-pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const headSha = '${{ github.event.workflow_run.head_sha }}';
+            const headBranch = '${{ github.event.workflow_run.head_branch }}';
+            
+            // Найти PR по коммиту
+            const { data: prs } = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              head: `${context.repo.owner}:${headBranch}`,
+            });
+            
+            if (prs.length > 0) {
+              const pr = prs.find(p => p.head.sha === headSha) || prs[0];
+              core.setOutput('number', pr.number);
+              core.setOutput('base', pr.base.ref);
+              core.setOutput('draft', pr.draft);
+              core.setOutput('mergeable', pr.mergeable);
+              core.setOutput('merged', pr.merged);
+              console.log(`Found PR #${pr.number}`);
+              return pr.number;
+            }
+            console.log('No open PR found');
+            return null;
+
+      - name: Check all status checks
+        if: steps.find-pr.outputs.number != ''
+        id: status-checks
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prNumber = ${{ steps.find-pr.outputs.number }};
+            const headSha = '${{ github.event.workflow_run.head_sha }}';
+            
+            // Получить комбинированный статус проверок
+            const { data: status } = await github.rest.repos.getCombinedStatusForRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: headSha,
+            });
+            
+            const allPassed = status.state === 'success';
+            console.log(`Combined status: ${status.state}`);
+            console.log(`Total checks: ${status.total_count}`);
+            console.log(`Passed: ${status.statuses.filter(s => s.state === 'success').length}`);
+            
+            core.setOutput('all_passed', allPassed);
+            return { allPassed, state: status.state };
+
+      - name: Auto-merge Pull Request
+        if: |
+          steps.find-pr.outputs.number != '' && 
+          steps.status-checks.outputs.all_passed == 'true' &&
+          steps.find-pr.outputs.merged == 'false' &&
+          steps.find-pr.outputs.draft == 'false' &&
+          steps.find-pr.outputs.mergeable == 'true' &&
+          (steps.find-pr.outputs.base == 'main' || steps.find-pr.outputs.base == 'development')
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prNumber = ${{ steps.find-pr.outputs.number }};
+            
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber,
+            });
+            
+            try {
+              await github.rest.pulls.merge({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber,
+                merge_method: 'squash',
+                commit_title: `Merge PR #${prNumber}: ${pr.title}`,
+                commit_message: `Automatically merged after all checks passed\n\n${pr.body || ''}`,
+              });
+              console.log(`PR #${prNumber} успешно автоматически слит`);
+            } catch (error) {
+              console.log(`Не удалось автоматически слить PR: ${error.message}`);
+            }
+
