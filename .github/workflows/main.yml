@@ -42,3 +42,46 @@ jobs:
             -destination 'platform=iOS Simulator,name=iPhone 16,OS=18.6' \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO
+
+      - name: Auto-merge Pull Request
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prNumber = context.payload.pull_request.number;
+            
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber,
+            });
+            
+            // Автоматически сливаем PR только если:
+            // 1. PR открыт в main или development
+            // 2. PR не в draft статусе
+            // 3. PR mergeable и не merged
+            if ((pr.base.ref === 'main' || pr.base.ref === 'development') && 
+                !pr.draft && 
+                pr.mergeable &&
+                !pr.merged) {
+              try {
+                await github.rest.pulls.merge({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: prNumber,
+                  merge_method: 'squash',
+                  commit_title: `Merge PR #${prNumber}: ${pr.title}`,
+                  commit_message: `Automatically merged after all checks passed\n\n${pr.body || ''}`,
+                });
+                console.log(`✅ PR #${prNumber} успешно автоматически слит`);
+              } catch (error) {
+                console.log(`⚠️ Не удалось автоматически слить PR: ${error.message}`);
+                // Не падаем, так как это может быть из-за конфликтов или других причин
+              }
+            } else {
+              console.log(`⏭️ PR не подходит для автоматического слияния:`);
+              console.log(`   - Base branch: ${pr.base.ref}`);
+              console.log(`   - Draft: ${pr.draft}`);
+              console.log(`   - Mergeable: ${pr.mergeable}`);
+              console.log(`   - Merged: ${pr.merged}`);
+            }
