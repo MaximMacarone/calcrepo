@@ -3,10 +3,16 @@ name: iOS Build and Test
 on:
   push:
     branches:
-      - '*'
+      - main
+      - development
+      - 'release/**'
+    tags:
+      - 'v*'
   pull_request:
     branches:
-      - '*'
+      - main
+      - development
+      - 'release/**'
 
 jobs:
   build-and-test:
