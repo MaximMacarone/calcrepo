@@ -9,7 +9,7 @@
 PRODUCT_NAME = SimpleCalculator
 PRODUCT_DISPLAY_NAME = Simple Calculator
 PRODUCT_BUNDLE_IDENTIFIER = com.example.simplecalculator
-MARKETING_VERSION = 1.0
+MARKETING_VERSION = 1.0.0
 CURRENT_PROJECT_VERSION = 1
 
 // ==========================================
