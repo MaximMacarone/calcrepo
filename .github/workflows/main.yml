@@ -59,11 +59,24 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO || echo "Documentation generation completed (warnings may occur)"
 
-      - name: Commit Documentation Updates
-        if: github.event_name == 'push' && github.ref == 'refs/heads/release/v1.0.0'
+      - name: Archive Documentation
+        if: success() || failure()
         run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-          git add docs/ || true
-          git diff --staged --quiet || git commit -m "docs: Auto-update documentation [skip ci]" || echo "No documentation changes to commit"
-          git push || echo "No changes to push"
+          DOC_ARCHIVE=$(find ./DerivedData -name "*.doccarchive" -type d | head -1)
+          if [ -n "$DOC_ARCHIVE" ]; then
+            echo "Found documentation archive: $DOC_ARCHIVE"
+            # Create zip archive to avoid issues with special characters in filenames
+            cd "$(dirname "$DOC_ARCHIVE")"
+            zip -r "$GITHUB_WORKSPACE/documentation.zip" "$(basename "$DOC_ARCHIVE")" || echo "Failed to create zip"
+          else
+            echo "No documentation archive found"
+          fi
+
+      - name: Upload Documentation Artifact
+        if: success() || failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: documentation
+          path: documentation.zip
+          if-no-files-found: ignore
+          retention-days: 30
